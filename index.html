@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>birdar - bird tracking AR</title>
+<style>
+body { margin: 0; padding: 16px; background: #10151c; color: #dde6ee; font: 15px/1.4 system-ui, sans-serif; }
+h1 { margin: 0 0 4px; font-size: 22px; }
+p { margin: 4px 0 12px; color: #9fb0c0; max-width: 720px; }
+button, label.file { display: inline-block; margin: 0 8px 8px 0; padding: 12px 18px; border: 0; border-radius: 8px;
+	background: #2d6cdf; color: #fff; font: inherit; cursor: pointer; }
+button:disabled { background: #3a4552; color: #8a96a3; cursor: default; }
+label.file { background: #3a4552; }
+label.file input { display: none; }
+.row { margin: 8px 0; }
+.row label { display: inline-block; width: 90px; }
+.row input[type=range] { width: 220px; vertical-align: middle; }
+#status { margin: 8px 0; color: #ffd27a; white-space: pre-wrap; }
+#hud { display: block; margin-top: 12px; max-width: 100%; border-radius: 6px; background: #000; }
+#video { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0.01; pointer-events: none; }
+</style>
+</head>
+<body>
+<h1>birdar</h1>
+<p>Bird tracking in AR for Meta Quest 3. The app finds dark spots on bright sky in the passthrough camera
+and puts a ring and a trail on each bird. Start the camera first, then enter AR.</p>
+
+<button id="cam">1. Start camera</button>
+<button id="ar" disabled>2. Enter AR</button>
+<label class="file">Test with video file<input id="file" type="file" accept="video/*"></label>
+
+<div class="row"><label>contrast</label><input id="contrast" type="range" min="5" max="80" step="1"> <span></span></div>
+<div class="row"><label>sky min</label><input id="skyMin" type="range" min="40" max="230" step="1"> <span></span></div>
+<div class="row"><label>max area</label><input id="maxArea" type="range" min="20" max="2000" step="10"> <span></span></div>
+
+<div id="status">Not started.</div>
+<canvas id="hud" width="480" height="440"></canvas>
+<video id="video" muted playsinline loop></video>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
