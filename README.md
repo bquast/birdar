@@ -43,7 +43,9 @@ Cloudflare Pages also works (static, no functions necessary).
 1. Open the page in the Quest Browser.
 2. Push **1. Start camera**. Allow the headset camera permission.
 3. Push **2. Enter AR**.
-4. Look at the sky. On the HUD: yellow boxes are blobs, coloured circles are birds,
+4. The HUD floats 1 m in front of you, a little low. It stays in the world when you turn.
+   Point a controller at it (the ray becomes yellow) and hold the grip to move it. Click a stick to get it back.
+5. Look at the sky. On the HUD: yellow boxes are blobs, coloured circles are birds,
    the dashed line is `minElev` above the horizon. The app ignores all blobs below the line.
 
 If the browser asks for the permission again when you enter AR, allow it, reload the page, and do the steps again.
@@ -55,7 +57,9 @@ If the browser asks for the permission again when you enter AR, allow it, reload
 | right stick | camera yaw / pitch offset |
 | left stick up/down | camera field of view |
 | left stick left/right | contrast threshold |
-| A | HUD on / off |
+| point at the HUD + hold grip | move the HUD (it stays where you release it) |
+| stick click (either) | HUD in front of you again |
+| A | HUD on / off (on = in front of you) |
 | B | reset calibration |
 | X | latency compensation, 0 to 200 ms in steps of 40 |
 | Y | clear tracks |
@@ -91,6 +95,8 @@ Possible next step: put a small ONNX or TF.js COCO detector (class "bird") after
 
 ## Changes
 
+- v3: HUD floats in the world 1 m away (it was 0.55 m away and head-locked). Grab it with the grip to move it.
+  Stick click puts it in front of you again. Controller rays.
 - v2: sky colour test, sky fraction around each blob, horizon filter, tracker needs a smooth path and
   movement, 320 px processing, horizon line on the HUD. v1 found 40-60 false blobs per frame on tiles,
   pool and trees in full sun.

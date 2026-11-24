@@ -2,7 +2,7 @@
 // Flow: camera frame -> small canvas -> detect() -> world directions with head pose -> step() tracker
 //       -> rings and trails at a fixed distance along each direction.
 import * as THREE from './three.module.js';
-import { detect, toWorld, toImage, step, confirmed, speed, add, scale, rad, aboveHorizon, horizonLine } from './detect.js';
+import { detect, toWorld, toImage, step, confirmed, speed, add, scale, norm, qrot, rad, aboveHorizon, horizonLine } from './detect.js';
 
 // ---------- settings: defaults <- saved <- URL (?fov=80&lag=100&cam=camera%202) ----------
 
@@ -133,17 +133,54 @@ const markers = Array.from({ length: POOL }, () => {
 	return { ring, line };
 });
 
-// head-locked HUD: the same canvas as on the page
+// HUD: the same canvas as on the page. It floats in the world, ~1 m away.
+// Point a controller at it and hold the grip to move it. Stick click or A (on) puts it in front of you again.
+const HUD_DIST = 1.0, HUD_DROP = 0.3, HUD_W = 0.5;
 const hudTex = new THREE.CanvasTexture(hud);
 hudTex.colorSpace = THREE.SRGBColorSpace;
 const hudMesh = new THREE.Mesh(
-	new THREE.PlaneGeometry(0.3, 0.3 * hud.height / hud.width),
-	new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, opacity: 0.85, depthTest: false })
+	new THREE.PlaneGeometry(HUD_W, HUD_W * hud.height / hud.width),
+	new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide })
 );
-hudMesh.position.set(0, -0.17, -0.55);
-hudMesh.rotation.x = -0.3;
 hudMesh.renderOrder = 20;
-camera.add(hudMesh);
+scene.add(hudMesh);
+
+// in front of the head, level with the floor, a little low, facing the head
+const placeHud = (pose) => {
+	const f = qrot(pose.q, [0, 0, -1]);
+	const h = norm([f[0], 0, f[2]]);
+	const c = add(pose.p, add(scale(h, HUD_DIST), [0, -HUD_DROP, 0]));
+	hudMesh.position.set(c[0], c[1], c[2]);
+	hudMesh.lookAt(pose.p[0], pose.p[1], pose.p[2]);
+};
+
+// controller rays: point at the HUD, hold the grip (squeeze) to grab it
+const raycaster = new THREE.Raycaster();
+const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+let grabbedBy = null;
+const aimsAtHud = (c) => {
+	if (!hudMesh.visible) return false;
+	raycaster.setFromXRController(c);
+	return raycaster.intersectObject(hudMesh).length > 0;
+};
+const ctrls = [0, 1].map((i) => {
+	const c = renderer.xr.getController(i);
+	const ray = new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
+	ray.scale.z = 3;
+	c.add(ray);
+	scene.add(c);
+	c.addEventListener('squeezestart', () => {
+		if (grabbedBy || !aimsAtHud(c)) return;
+		c.attach(hudMesh);                          // keeps the world pose, then moves with the hand
+		grabbedBy = c;
+	});
+	c.addEventListener('squeezeend', () => {
+		if (grabbedBy !== c) return;
+		scene.attach(hudMesh);                      // stays where you let go
+		grabbedBy = null;
+	});
+	return { c, ray };
+});
 
 // ---------- state ----------
 
@@ -161,6 +198,7 @@ let lastProc = 0;
 let lastLoop = 0;
 let ticks = 0, hz = 0, hzT = 0;
 let hudOn = true;
+let hudPlace = false;                               // put the HUD in front on the next XR frame
 let dirty = false;
 const prevBtn = {};
 
@@ -242,7 +280,8 @@ const drawHud = () => {
 		'  lag ' + S.lag + 'ms  contrast ' + Math.round(S.contrast), 8, IH + 44);
 	hctx.fillStyle = '#8a96a3';
 	hctx.font = '13px system-ui, sans-serif';
-	hctx.fillText('R stick yaw/pitch   L stick fov/contrast   A hud   B reset   X lag   Y clear', 8, IH + 68);
+	hctx.fillText('R stick yaw/pitch  L stick fov/contrast  A hud  B reset  X lag  Y clear', 8, IH + 64);
+	hctx.fillText('point + grip: move this panel   stick click: panel in front', 8, IH + 82);
 };
 
 // ---------- AR markers ----------
@@ -289,9 +328,10 @@ const input = (session, dt) => {
 		};
 		if (src.handedness === 'right') {
 			if (sx || sy) { S.yaw -= sx * 8 * dt; S.pitch -= sy * 8 * dt; changed = true; }
-			if (press(4)) hudOn = !hudOn;
+			if (press(4)) { hudOn = !hudOn; hudPlace = hudOn; }
 			if (press(5)) { S.yaw = DEF.yaw; S.pitch = DEF.pitch; S.fov = DEF.fov; S.lag = DEF.lag; changed = true; }
 		}
+		if (press(3)) { hudOn = true; hudPlace = true; }   // stick click: HUD in front of you
 		if (src.handedness === 'left') {
 			if (sx || sy) {
 				S.contrast = clamp(S.contrast + sx * 15 * dt, 5, 80);
@@ -325,6 +365,10 @@ renderer.setAnimationLoop((time, frame) => {
 	poses = poses.filter((x) => now - x.t < 1000).concat([pose]);
 
 	input(frame.session, dt);
+	if (hudPlace && !grabbedBy) { placeHud(pose); hudPlace = false; }
+	ctrls.forEach((k) => {
+		k.ray.material.color.set(grabbedBy === k.c ? 0x00ff88 : aimsAtHud(k.c) ? 0xffd200 : 0xffffff);
+	});
 	if (now - lastProc > 1000 / S.hz) {
 		tick(now, pose);
 		if (hudOn) { drawHud(); hudTex.needsUpdate = true; }
@@ -337,9 +381,18 @@ renderer.setAnimationLoop((time, frame) => {
 $('ar').onclick = async () => {
 	try {
 		const session = await navigator.xr.requestSession('immersive-ar', {});
-		session.addEventListener('end', () => { status('AR ended. Settings saved.'); syncSliders(); });
+		session.addEventListener('end', () => {
+			if (grabbedBy) { scene.attach(hudMesh); grabbedBy = null; }
+			status('AR ended. Settings saved.');
+			syncSliders();
+		});
 		await renderer.xr.setSession(session);
+		hudOn = true;
+		hudPlace = true;
 	} catch (e) {
 		status('AR error: ' + e.name + ' ' + e.message);
 	}
 };
+
+// for tests and the console
+window.birdar = { S, hudMesh, tracks: () => tracks };
