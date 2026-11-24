@@ -2,25 +2,29 @@
 // Flow: camera frame -> small canvas -> detect() -> world directions with head pose -> step() tracker
 //       -> rings and trails at a fixed distance along each direction.
 import * as THREE from './three.module.js';
-import { detect, toWorld, toImage, step, confirmed, speed, add, scale, rad } from './detect.js';
+import { detect, toWorld, toImage, step, confirmed, speed, add, scale, rad, aboveHorizon, horizonLine } from './detect.js';
 
 // ---------- settings: defaults <- saved <- URL (?fov=80&lag=100&cam=camera%202) ----------
 
 const DEF = {
 	fov: 72, yaw: 0, pitch: 0, lag: 60,                    // camera model and calibration (deg, ms)
-	radius: 10, skyMin: 110, contrast: 22,                 // sky mask
-	minArea: 3, maxArea: 400, maxSide: 40, minFill: 0.2,   // blob filter (pixels in the small image)
-	gate: 8, alpha: 0.6, beta: 0.4, minHits: 3, maxMiss: 10, trail: 40,   // tracker
-	dist: 20, width: 240, hz: 15,                          // marker distance (m), process size, rate
+	skyMin: 110, blue: 15, grey: 30,                       // sky colour: bright, and blue or grey/white
+	radius: 12, skyRadius: 24, skyFrac: 0.85, contrast: 22, // bird: darker than area, area mostly sky
+	minArea: 2, maxArea: 120, maxSide: 20, minFill: 0.2,   // blob filter (pixels in the small image)
+	minElev: 3,                                            // degrees above the horizon
+	gate: 8, alpha: 0.6, beta: 0.4, minHits: 5, maxErr: 1.5, minMove: 2,   // tracker: smooth and moving
+	maxMiss: 10, trail: 40,
+	dist: 20, width: 320, hz: 15,                          // marker distance (m), process size, rate
 	cam: 'camera 1|facing back'                            // regex on camera label
 };
-const SAVE = ['fov', 'yaw', 'pitch', 'lag', 'contrast', 'skyMin', 'maxArea'];
+const SAVE = ['fov', 'yaw', 'pitch', 'lag', 'contrast', 'skyMin', 'skyFrac', 'minElev'];
+const KEY = 'birdar2';
 
 const load = () => {
-	try { return JSON.parse(localStorage.getItem('birdar') || '{}'); } catch (e) { return {}; }
+	try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; }
 };
 const save = (s) => {
-	try { localStorage.setItem('birdar', JSON.stringify(Object.fromEntries(SAVE.map((k) => [k, s[k]])))); } catch (e) {}
+	try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(SAVE.map((k) => [k, s[k]])))); } catch (e) {}
 };
 const fromUrl = () => {
 	const q = new URLSearchParams(location.search);
@@ -40,10 +44,10 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const hue = (id) => (id * 0.618) % 1;
 const css = (id) => 'hsl(' + Math.round(hue(id) * 360) + ',100%,60%)';
 
-const SLIDERS = ['contrast', 'skyMin', 'maxArea'];
+const SLIDERS = ['contrast', 'skyMin', 'skyFrac', 'minElev'];
 const syncSliders = () => SLIDERS.forEach((k) => {
 	$(k).value = S[k];
-	$(k).nextElementSibling.textContent = Math.round(S[k]);
+	$(k).nextElementSibling.textContent = S[k].toFixed(k === 'skyFrac' ? 2 : 0);
 });
 SLIDERS.forEach((k) => {
 	$(k).oninput = () => { S[k] = Number($(k).value); syncSliders(); save(S); };
@@ -150,6 +154,7 @@ const IDENT = { t: 0, q: { x: 0, y: 0, z: 0, w: 1 }, p: [0, 0, 0] };
 let tracks = [];
 let nextId = 1;
 let dets = [];
+let rawCount = 0;
 let poses = [];
 let procPose = IDENT;
 let lastProc = 0;
@@ -174,11 +179,13 @@ const tick = (now, pose) => {
 
 	const p0 = poseAt(poses, now - S.lag, pose);
 	const cal = { yaw: S.yaw, pitch: S.pitch };
-	dets = detect(img.data, w, h, S).map((b) => ({
+	const all = detect(img.data, w, h, S).map((b) => ({
 		...b,
 		dir: toWorld(b.x, b.y, S.fov, w / h, cal, p0.q),
 		size: rad(S.fov) * Math.max(b.w, b.h)
 	}));
+	dets = all.filter((d) => aboveHorizon(d.dir, S.minElev));
+	rawCount = all.length;
 	const dt = lastProc ? Math.min((now - lastProc) / 1000, 0.5) : 1 / S.hz;
 	[tracks, nextId] = step(tracks, dets, dt, nextId, S);
 	procPose = p0;
@@ -197,6 +204,17 @@ const drawHud = () => {
 	const iw = Math.min(W, IH * ar), ih = iw / ar;
 	const ox = (W - iw) / 2, oy = (IH - ih) / 2;
 	if (proc.width) hctx.drawImage(proc, ox, oy, iw, ih);
+
+	// line at minElev: blobs below it are ignored. Also shows if the calibration matches the real horizon.
+	const cal0 = { yaw: S.yaw, pitch: S.pitch };
+	const hpts = horizonLine(procPose.q, S.minElev, 60, 5).map((d) => toImage(d, S.fov, ar, cal0, procPose.q)).filter((p) => p);
+	hctx.strokeStyle = 'rgba(255,255,255,0.7)';
+	hctx.lineWidth = 1;
+	hctx.setLineDash([6, 6]);
+	hctx.beginPath();
+	hpts.forEach((p, i) => i ? hctx.lineTo(ox + p.u * iw, oy + p.v * ih) : hctx.moveTo(ox + p.u * iw, oy + p.v * ih));
+	hctx.stroke();
+	hctx.setLineDash([]);
 
 	hctx.lineWidth = 2;
 	hctx.strokeStyle = '#ffd200';
@@ -218,7 +236,8 @@ const drawHud = () => {
 
 	const n = confirmed(tracks, S).length;
 	hctx.fillStyle = '#dde6ee';
-	hctx.fillText('birds ' + n + '   blobs ' + dets.length + '   ' + hz + ' Hz', 8, IH + 22);
+	hctx.fillText('birds ' + n + '   blobs ' + dets.length + ' (+' + (rawCount - dets.length) + ' below line)   tracks ' +
+		tracks.length + '   ' + hz + ' Hz', 8, IH + 22);
 	hctx.fillText('fov ' + S.fov.toFixed(1) + '  yaw ' + S.yaw.toFixed(1) + '  pitch ' + S.pitch.toFixed(1) +
 		'  lag ' + S.lag + 'ms  contrast ' + Math.round(S.contrast), 8, IH + 44);
 	hctx.fillStyle = '#8a96a3';

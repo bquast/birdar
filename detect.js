@@ -60,15 +60,34 @@ export const boxMean = (I, w, h, x, y, r) => {
 	return s / ((x1 - x0) * (y1 - y0));
 };
 
-// 1 where the pixel is darker than its bright surroundings (a bird on sky)
-export const mask = (g, w, h, opt) => {
-	const I = integral(g, w, h);
+// sky colour: bright and blue (clear sky), or bright and grey/white (cloud, overcast)
+// beige tiles, green leaves, red roofs are not sky
+export const skyLike = (r, g, b, opt) => {
+	const l = 0.299 * r + 0.587 * g + 0.114 * b;
+	if (l < opt.skyMin) return 0;
+	if (b > r + opt.blue && b >= g) return 1;
+	return (Math.max(r, g, b) - Math.min(r, g, b) < opt.grey) ? 1 : 0;
+};
+
+// 1 where the pixel is not sky, is darker than its surroundings,
+// and most of its surroundings are sky (a bird on sky, not a leaf on a tree)
+export const mask = (rgba, w, h, opt) => {
+	const g = gray(rgba, w, h);
+	const s = new Float32Array(w * h);
+	for (let i = 0; i < w * h; i++) {
+		s[i] = skyLike(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], opt);
+	}
+	const Ig = integral(g, w, h);
+	const Is = integral(s, w, h);
 	const m = new Uint8Array(w * h);
 	for (let y = 0; y < h; y++) {
 		for (let x = 0; x < w; x++) {
-			const bg = boxMean(I, w, h, x, y, opt.radius);
-			const v = g[y * w + x];
-			m[y * w + x] = (bg >= opt.skyMin && bg - v >= opt.contrast) ? 1 : 0;
+			const i = y * w + x;
+			if (s[i]) continue;
+			const frac = boxMean(Is, w, h, x, y, opt.skyRadius);
+			if (frac < opt.skyFrac) continue;
+			const bg = boxMean(Ig, w, h, x, y, opt.radius);
+			m[i] = (bg - g[i] >= opt.contrast) ? 1 : 0;
 		}
 	}
 	return m;
@@ -111,9 +130,22 @@ export const blobs = (m, w, h, opt) => {
 	return out;
 };
 
-export const detect = (rgba, w, h, opt) => {
-	const g = gray(rgba, w, h);
-	return blobs(mask(g, w, h, opt), w, h, opt);
+export const detect = (rgba, w, h, opt) => blobs(mask(rgba, w, h, opt), w, h, opt);
+
+// world direction is at least minElev degrees above the horizon (local space: +Y is up)
+export const aboveHorizon = (dir, minElev) => dir[1] > Math.sin(rad(minElev));
+
+// world directions along the line at elevation elev, +-span degrees around where the head looks
+export const horizonLine = (q, elev, span, stepDeg) => {
+	const f = qrot(q, [0, 0, -1]);
+	const az = Math.atan2(f[0], -f[2]);
+	const e = rad(elev);
+	const out = [];
+	for (let k = -span; k <= span; k += stepDeg) {
+		const a = az + rad(k);
+		out.push([Math.sin(a) * Math.cos(e), Math.sin(e), -Math.cos(a) * Math.cos(e)]);
+	}
+	return out;
 };
 
 // ---------- image point -> world direction ----------
@@ -146,8 +178,10 @@ export const toImage = (dir, hfov, aspect, cal, q) => {
 
 // ---------- tracker ----------
 
-// track: { id, d, v, hits, miss, size, trail }
+// track: { id, d, d0, v, hits, miss, err, size, trail }
+//   d0 = first direction; a track must move minMove deg from d0 (static tree tips, roof corners never do)
 //   d = direction (unit), v = direction change per second, size = angular size (rad)
+//   err = running mean of prediction error (deg): small for a smooth flight, large for random blobs
 // det:   { dir, size }
 // returns [tracks, nextId]
 export const step = (tracks, dets, dt, nextId, opt) => {
@@ -168,32 +202,35 @@ export const step = (tracks, dets, dt, nextId, opt) => {
 
 	const hit = (t, det) => {
 		const d = norm(lerp(t.p, det.dir, opt.alpha));
+		const e = deg(angle(t.p, det.dir));
 		const vNew = scale(sub(det.dir, t.d), 1 / Math.max(dt, 1e-3));
 		return {
-			id: t.id, d, v: lerp(t.v, vNew, opt.beta),
-			hits: t.hits + 1, miss: 0,
+			id: t.id, d, d0: t.d0, v: lerp(t.v, vNew, opt.beta),
+			hits: t.hits + 1, miss: 0, err: t.err * 0.5 + e * 0.5,
 			size: t.size + (det.size - t.size) * 0.3,
 			trail: t.trail.concat([d]).slice(-opt.trail)
 		};
 	};
 	const miss = (t) => ({
-		id: t.id, d: t.p, v: scale(t.v, 0.8),
-		hits: t.hits, miss: t.miss + 1, size: t.size, trail: t.trail
+		id: t.id, d: t.p, d0: t.d0, v: scale(t.v, 0.8),
+		hits: t.hits, miss: t.miss + 1, err: t.err, size: t.size, trail: t.trail
 	});
 
 	const kept = pred
 		.map((t, i) => match.has(i) ? hit(t, dets[match.get(i)]) : miss(t))
-		.filter((t) => t.miss <= (t.hits >= opt.minHits ? opt.maxMiss : 1));
+		.filter((t) => t.miss <= (isConfirmed(t, opt) ? opt.maxMiss : 1));
 
 	let id = nextId;
 	const born = dets
 		.filter((d, j) => !usedD.has(j))
-		.map((d) => ({ id: id++, d: d.dir, v: [0, 0, 0], hits: 1, miss: 0, size: d.size, trail: [d.dir] }));
+		.map((d) => ({ id: id++, d: d.dir, d0: d.dir, v: [0, 0, 0], hits: 1, miss: 0, err: opt.gate, size: d.size, trail: [d.dir] }));
 
 	return [kept.concat(born), id];
 };
 
-export const confirmed = (tracks, opt) => tracks.filter((t) => t.hits >= opt.minHits);
+export const isConfirmed = (t, opt) =>
+	t.hits >= opt.minHits && t.err < opt.maxErr && deg(angle(t.d, t.d0)) >= opt.minMove;
+export const confirmed = (tracks, opt) => tracks.filter((t) => isConfirmed(t, opt));
 
 // angular speed in degrees per second
 export const speed = (t) => deg(len(t.v));

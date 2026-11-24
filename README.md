@@ -5,11 +5,18 @@ Bird tracking proof of concept for Meta Quest 3. WebXR `immersive-ar` with passt
 The Quest Browser does not support the WebXR `camera-access` feature. The app gets the passthrough
 camera through `getUserMedia`, the same as a webcam. The app then:
 
-1. Draws each camera frame on a small canvas (240 px wide).
-2. Finds small dark blobs on bright sky (local mean box filter, then connected components).
-3. Changes each blob centre into a world direction: camera ray, then calibration (yaw, pitch), then head pose.
-4. Tracks the directions over time (greedy nearest angle, velocity prediction).
-5. Shows a ring and a trail for each confirmed bird, 20 m away along its direction.
+1. Draws each camera frame on a small canvas (320 px wide).
+2. Finds bird pixels. A bird pixel:
+   - is not sky colour (sky colour = bright, and blue or grey/white),
+   - is darker than the local mean by `contrast`,
+   - has mostly sky around it (`skyFrac` of the area in `skyRadius` is sky colour).
+3. Joins bird pixels into blobs (connected components) and removes blobs that are too large or too thin.
+4. Changes each blob centre into a world direction: camera ray, then calibration (yaw, pitch), then head pose.
+5. Removes blobs below `minElev` degrees above the horizon (pool, tiles, ground).
+6. Tracks the directions over time (greedy nearest angle, velocity prediction).
+   A track is a bird only if it has `minHits` hits, a smooth path (`maxErr`) and moves `minMove` degrees.
+   Static tree tips and roof corners never move. Random flicker is not smooth.
+7. Shows a ring and a trail for each bird, 20 m away along its direction.
 
 Birds are far away, so the small offset between the camera and the eyes has almost no effect. Only rotation is important.
 
@@ -36,7 +43,8 @@ Cloudflare Pages also works (static, no functions necessary).
 1. Open the page in the Quest Browser.
 2. Push **1. Start camera**. Allow the headset camera permission.
 3. Push **2. Enter AR**.
-4. Look at the sky. Yellow boxes on the HUD are blobs. Coloured circles are confirmed birds.
+4. Look at the sky. On the HUD: yellow boxes are blobs, coloured circles are birds,
+   the dashed line is `minElev` above the horizon. The app ignores all blobs below the line.
 
 If the browser asks for the permission again when you enter AR, allow it, reload the page, and do the steps again.
 
@@ -53,7 +61,7 @@ If the browser asks for the permission again when you enter AR, allow it, reload
 | Y | clear tracks |
 
 The app saves the settings in localStorage. You can also set settings in the URL, for example
-`?fov=80&lag=100&contrast=30&cam=camera%202`. Refer to `DEF` in `app.js` for all keys.
+`?fov=80&lag=100&contrast=30&minMove=4&cam=camera%201`. Refer to `DEF` in `app.js` for all keys.
 
 ## Calibration
 
@@ -62,6 +70,7 @@ The browser does not give camera intrinsics or the camera pose. The defaults are
 1. Find a dark object on a bright background, for example a lamp post on the sky or a dark sticker on a white wall.
 2. Hold your head still. Move the right stick until the ring is on the object.
 3. Turn your head to put the object near the edge of the view. If the ring moves away from the object, change the FOV with the left stick.
+   Also, the dashed line on the HUD must be parallel to the real horizon, a little above it.
 4. Turn your head quickly. If the ring is late, push X to increase the latency compensation.
 
 ## Desktop test
@@ -71,9 +80,18 @@ The page also works on a desktop browser without AR. Use **Start camera** (webca
 
 ## Limits
 
-- The app finds birds on sky only. It does not find birds on trees, buildings or water.
-- No ML model. Dark spots on the sky (aircraft, insects near the lens, wires) also become "birds".
+- The app finds flying birds on sky only. It does not find birds on trees, buildings or water, or birds that sit still.
+- No ML model. Dark moving spots on the sky (aircraft, insects near the lens) also become "birds".
+- Bad calibration makes static objects seem to move when you turn your head. Then tree tips can become "birds".
+  Calibrate first. If necessary, increase `minMove` in the URL.
 - The distance to each ring is fixed (20 m). The direction is correct, but the distance is not.
 - The video frame and the head pose are not synchronized exactly. The `lag` setting is an approximate fix.
 
 Possible next step: put a small ONNX or TF.js COCO detector (class "bird") after the blob step, to classify each blob crop.
+
+## Changes
+
+- v2: sky colour test, sky fraction around each blob, horizon filter, tracker needs a smooth path and
+  movement, 320 px processing, horizon line on the HUD. v1 found 40-60 false blobs per frame on tiles,
+  pool and trees in full sun.
+- v1: first version.
