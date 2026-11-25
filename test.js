@@ -1,11 +1,11 @@
 // test.js - run with: node test.js
 // Synthetic scenes: sky with birds, tree line, tiles, foliage with sky gaps, clouds. No browser needed.
-import { detect, toWorld, toImage, step, confirmed, speed, angle, deg, aboveHorizon, horizonLine } from './detect.js';
+import { detect, minPool2, toWorld, toImage, step, confirmed, speed, angle, deg, aboveHorizon, horizonLine } from './detect.js';
 
 const OPT = {
-	radius: 8, skyRadius: 16, skyMin: 110, blue: 15, grey: 30, skyFrac: 0.85, contrast: 22,
-	minArea: 2, maxArea: 120, maxSide: 20, minFill: 0.2,
-	gate: 6, alpha: 0.6, beta: 0.4, minHits: 5, maxErr: 1.5, minMove: 2, maxMiss: 8, trail: 30
+	radius: 8, skyRadius: 16, blueMin: 60, greyMin: 150, blue: 15, grey: 30, skyFrac: 0.85, contrast: 22,
+	minArea: 1, maxArea: 120, maxSide: 20, minFill: 0.2,
+	gate: 6, alpha: 0.6, beta: 0.4, minHits: 5, maxErr: 2, minMove: 2, maxMiss: 8, trail: 30
 };
 
 const W = 160, H = 120;
@@ -95,6 +95,49 @@ ok(detect(clouds, W, H, OPT).length === 0, 'cloud edges give no blobs (got ' + d
 // grey overcast sky with a bird
 const overcast = image((x, y) => inBird([{ x: 80, y: 40, r: 3 }], x, y) ? BIRD : [190 + rnd(8), 192 + rnd(8), 196 + rnd(8)]);
 ok(detect(overcast, W, H, OPT).length === 1, 'bird on overcast sky found');
+
+// deep blue sky (Costa Rica, morning, near the zenith: luma ~100) with a bird
+const deep = image((x, y) => inBird([{ x: 80, y: 40, r: 3 }], x, y) ? BIRD : [62 + rnd(6), 106 + rnd(6), 170 + rnd(6)]);
+ok(detect(deep, W, H, OPT).length === 1, 'bird on deep blue sky found (luma ~100)');
+
+// grey shadow / asphalt (luma ~90, no blue): not sky, so no blobs
+const shade = image((x, y) => (x % 15 === 0) ? [50, 50, 50] : [92 + rnd(6), 90 + rnd(6), 88 + rnd(6)]);
+ok(detect(shade, W, H, OPT).length === 0, 'grey shadow gives no blobs');
+
+// tiny weak bird: 2x1 px in a 2x larger camera image, luma 78 on sky 100
+const W2 = W * 2, H2 = H * 2;
+const cam = new Uint8ClampedArray(W2 * H2 * 4);
+for (let y = 0; y < H2; y++) {
+	for (let x = 0; x < W2; x++) {
+		const i = (y * W2 + x) * 4;
+		const b = (x === 101 || x === 102) && y === 61;
+		const c = b ? [70, 78, 92] : [62 + rnd(4), 106 + rnd(4), 170 + rnd(4)];
+		cam[i] = c[0]; cam[i + 1] = c[1]; cam[i + 2] = c[2]; cam[i + 3] = 255;
+	}
+}
+// what a normal (averaging) downscale does
+const avg = new Uint8ClampedArray(W * H * 4);
+for (let y = 0; y < H; y++) {
+	for (let x = 0; x < W; x++) {
+		for (let k = 0; k < 3; k++) {
+			let sum = 0;
+			for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) sum += cam[((2 * y + dy) * W2 + 2 * x + dx) * 4 + k];
+			avg[(y * W + x) * 4 + k] = sum / 4;
+		}
+		avg[(y * W + x) * 4 + 3] = 255;
+	}
+}
+const [pooled, PW, PH] = minPool2(cam, W2, H2);
+ok(PW === W && PH === H, 'minPool2 halves the size');
+ok(detect(avg, W, H, OPT).length === 0, 'tiny weak bird is lost with an averaging downscale');
+ok(detect(pooled, PW, PH, OPT).length === 1, 'tiny weak bird is kept with minPool2');
+let emptyHits = 0;
+for (let k = 0; k < 10; k++) {
+	const sky2 = new Uint8ClampedArray(W2 * H2 * 4);
+	for (let i = 0; i < W2 * H2; i++) { sky2[i * 4] = 62 + rnd(8); sky2[i * 4 + 1] = 106 + rnd(8); sky2[i * 4 + 2] = 170 + rnd(8); sky2[i * 4 + 3] = 255; }
+	emptyHits += detect(minPool2(sky2, W2, H2)[0], W, H, OPT).length;
+}
+ok(emptyHits === 0, 'noisy empty sky after minPool2 gives no blobs (got ' + emptyHits + ' in 10 frames)');
 
 // ---------- tracking: 20 frames, bird 1 moves right, bird 2 up-left, bird 1 hidden for 3 frames ----------
 let tracks = [], nid = 1;

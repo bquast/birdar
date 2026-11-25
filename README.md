@@ -5,18 +5,22 @@ Bird tracking proof of concept for Meta Quest 3. WebXR `immersive-ar` with passt
 The Quest Browser does not support the WebXR `camera-access` feature. The app gets the passthrough
 camera through `getUserMedia`, the same as a webcam. The app then:
 
-1. Draws each camera frame on a small canvas (320 px wide).
-2. Finds bird pixels. A bird pixel:
-   - is not sky colour (sky colour = bright, and blue or grey/white),
-   - is darker than the local mean by `contrast`,
-   - has mostly sky around it (`skyFrac` of the area in `skyRadius` is sky colour).
-3. Joins bird pixels into blobs (connected components) and removes blobs that are too large or too thin.
-4. Changes each blob centre into a world direction: camera ray, then calibration (yaw, pitch), then head pose.
-5. Removes blobs below `minElev` degrees above the horizon (pool, tiles, ground).
-6. Tracks the directions over time (greedy nearest angle, velocity prediction).
+1. Takes each camera frame (full size, 1280x960 on Quest 3) and sends it to a Web Worker.
+   The AR view does not wait for the image work.
+2. Halves the image with the darkest pixel of each 2x2 block, until it is about 320 px wide.
+   A small bird (4-8 px in the camera) stays a dark pixel. A normal downscale mixes it into the sky.
+3. Finds bird pixels. A bird pixel:
+   - has mostly sky around it (`skyFrac` of the area in `skyRadius` is sky colour;
+     sky colour = blue, also deep blue, or bright grey/white),
+   - is darker than that sky by `contrast`. The sky level is the mean of the *blue* sky around it,
+     so white clouds do not make the blue next to them look dark.
+4. Joins bird pixels into blobs (connected components) and removes blobs that are too large or too thin.
+5. Changes each blob centre into a world direction: camera ray, then calibration (yaw, pitch), then head pose.
+6. Removes blobs below `minElev` degrees above the horizon (pool, tiles, ground).
+7. Tracks the directions over time (greedy nearest angle, velocity prediction).
    A track is a bird only if it has `minHits` hits, a smooth path (`maxErr`) and moves `minMove` degrees.
    Static tree tips and roof corners never move. Random flicker is not smooth.
-7. Shows a ring and a trail for each bird, 20 m away along its direction.
+8. Shows a ring and a trail for each bird, 20 m away along its direction.
 
 Birds are far away, so the small offset between the camera and the eyes has almost no effect. Only rotation is important.
 
@@ -26,7 +30,8 @@ Birds are far away, so the small offset between the camera and the eyes has almo
 |---|---|
 | `index.html` | page, buttons, sliders |
 | `app.js` | camera, WebXR session, three.js markers, HUD, controllers |
-| `detect.js` | pure functions: image to blobs, pixel to world direction, tracker |
+| `detect.js` | pure functions: min-pool, image to blobs, pixel to world direction, tracker |
+| `worker.js` | Web Worker: camera frame to blobs, off the main thread |
 | `test.js` | `node test.js`, synthetic sky tests, no browser |
 | `three.module.js`, `three.core.js` | three.js r187 (MIT, `three.LICENSE`) |
 
@@ -95,6 +100,10 @@ Possible next step: put a small ONNX or TF.js COCO detector (class "bird") after
 
 ## Changes
 
+- v4: finds small birds on deep blue sky. v3 found none: the deep blue sky (luma ~105) was below
+  `skyMin` (110), and the 320 px downscale mixed 4-8 px birds into the sky. Now: blue sky has a low
+  limit (`blueMin`), the sky level is the mean of the blue sky, the image is reduced with the darkest
+  pixel of each 2x2 block, and the image work runs in a Web Worker.
 - v3: HUD floats in the world 1 m away (it was 0.55 m away and head-locked). Grab it with the grip to move it.
   Stick click puts it in front of you again. Controller rays.
 - v2: sky colour test, sky fraction around each blob, horizon filter, tracker needs a smooth path and

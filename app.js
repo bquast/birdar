@@ -1,23 +1,23 @@
 // app.js - birdar: bird tracking in AR on Meta Quest 3 (WebXR immersive-ar + getUserMedia camera).
-// Flow: camera frame -> small canvas -> detect() -> world directions with head pose -> step() tracker
+// Flow: camera frame -> worker (min-pool, detect) -> world directions with head pose -> step() tracker
 //       -> rings and trails at a fixed distance along each direction.
 import * as THREE from './three.module.js';
-import { detect, toWorld, toImage, step, confirmed, speed, add, scale, norm, qrot, rad, aboveHorizon, horizonLine } from './detect.js';
+import { toWorld, toImage, step, confirmed, speed, add, scale, norm, qrot, rad, aboveHorizon, horizonLine } from './detect.js';
 
 // ---------- settings: defaults <- saved <- URL (?fov=80&lag=100&cam=camera%202) ----------
 
 const DEF = {
 	fov: 72, yaw: 0, pitch: 0, lag: 60,                    // camera model and calibration (deg, ms)
-	skyMin: 110, blue: 15, grey: 30,                       // sky colour: bright, and blue or grey/white
-	radius: 12, skyRadius: 24, skyFrac: 0.85, contrast: 22, // bird: darker than area, area mostly sky
-	minArea: 2, maxArea: 120, maxSide: 20, minFill: 0.2,   // blob filter (pixels in the small image)
+	blueMin: 60, greyMin: 150, blue: 15, grey: 30,         // sky colour: blue (can be deep), or bright grey/white
+	skyRadius: 24, skyFrac: 0.85, contrast: 22,            // bird: area mostly sky, darker than that sky
+	minArea: 1, maxArea: 120, maxSide: 20, minFill: 0.2,   // blob filter (pixels in the small image)
 	minElev: 3,                                            // degrees above the horizon
-	gate: 8, alpha: 0.6, beta: 0.4, minHits: 5, maxErr: 1.5, minMove: 2,   // tracker: smooth and moving
+	gate: 8, alpha: 0.6, beta: 0.4, minHits: 5, maxErr: 2, minMove: 2,   // tracker: smooth and moving
 	maxMiss: 10, trail: 40,
-	dist: 20, width: 320, hz: 15,                          // marker distance (m), process size, rate
+	dist: 20, width: 320, hz: 15,                          // marker distance (m), detector width (after min-pool), rate
 	cam: 'camera 1|facing back'                            // regex on camera label
 };
-const SAVE = ['fov', 'yaw', 'pitch', 'lag', 'contrast', 'skyMin', 'skyFrac', 'minElev'];
+const SAVE = ['fov', 'yaw', 'pitch', 'lag', 'contrast', 'blueMin', 'skyFrac', 'minElev'];
 const KEY = 'birdar2';
 
 const load = () => {
@@ -44,7 +44,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const hue = (id) => (id * 0.618) % 1;
 const css = (id) => 'hsl(' + Math.round(hue(id) * 360) + ',100%,60%)';
 
-const SLIDERS = ['contrast', 'skyMin', 'skyFrac', 'minElev'];
+const SLIDERS = ['contrast', 'blueMin', 'skyFrac', 'minElev'];
 const syncSliders = () => SLIDERS.forEach((k) => {
 	$(k).value = S[k];
 	$(k).nextElementSibling.textContent = S[k].toFixed(k === 'skyFrac' ? 2 : 0);
@@ -195,6 +195,10 @@ let rawCount = 0;
 let poses = [];
 let procPose = IDENT;
 let lastProc = 0;
+let lastReq = 0;
+let busy = false;
+let pending = null;
+let hudDirty = false;
 let lastLoop = 0;
 let ticks = 0, hz = 0, hzT = 0;
 let hudOn = true;
@@ -207,30 +211,45 @@ const poseAt = (list, t, fallback) => list.length === 0 ? fallback :
 
 // ---------- one processing step: camera frame -> tracks ----------
 
-const tick = (now, pose) => {
-	const vw = video.videoWidth, vh = video.videoHeight;
-	if (!vw || video.readyState < 2) return;
-	const w = S.width, h = Math.round(S.width * vh / vw);
-	if (proc.width !== w || proc.height !== h) { proc.width = w; proc.height = h; }
-	pctx.drawImage(video, 0, 0, w, h);
-	const img = pctx.getImageData(0, 0, w, h);
+// main thread: take a camera frame and the head pose for it, send the frame to the worker
+const worker = new Worker('./worker.js', { type: 'module' });
 
+const tick = (now, pose) => {
+	if (busy || !video.videoWidth || video.readyState < 2) return;
+	busy = true;
+	lastReq = now;
 	const p0 = poseAt(poses, now - S.lag, pose);
+	createImageBitmap(video).then((bmp) => {
+		pending = { t: now, pose: p0 };
+		worker.postMessage({ bmp, opt: { ...S } }, [bmp]);
+	}).catch((e) => { busy = false; status('Frame error: ' + e.message); });
+};
+
+// worker answer: blobs -> world directions -> tracker
+worker.onmessage = (e) => {
+	const { blobs, px, w, h } = e.data;
+	const { t, pose } = pending;
+	busy = false;
+	if (proc.width !== w || proc.height !== h) { proc.width = w; proc.height = h; }
+	pctx.putImageData(new ImageData(px, w, h), 0, 0);
+
 	const cal = { yaw: S.yaw, pitch: S.pitch };
-	const all = detect(img.data, w, h, S).map((b) => ({
+	const all = blobs.map((b) => ({
 		...b,
-		dir: toWorld(b.x, b.y, S.fov, w / h, cal, p0.q),
+		dir: toWorld(b.x, b.y, S.fov, w / h, cal, pose.q),
 		size: rad(S.fov) * Math.max(b.w, b.h)
 	}));
 	dets = all.filter((d) => aboveHorizon(d.dir, S.minElev));
 	rawCount = all.length;
-	const dt = lastProc ? Math.min((now - lastProc) / 1000, 0.5) : 1 / S.hz;
+	const dt = lastProc ? Math.min((t - lastProc) / 1000, 0.5) : 1 / S.hz;
 	[tracks, nextId] = step(tracks, dets, dt, nextId, S);
-	procPose = p0;
-	lastProc = now;
+	procPose = pose;
+	lastProc = t;
+	hudDirty = true;
 	ticks++;
-	if (now - hzT > 1000) { hz = ticks; ticks = 0; hzT = now; }
+	if (t - hzT > 1000) { hz = ticks; ticks = 0; hzT = t; }
 };
+worker.onerror = (e) => { busy = false; status('Worker error: ' + e.message); };
 
 // ---------- HUD: small camera image, blobs (yellow), tracks (colour), settings ----------
 
@@ -354,7 +373,8 @@ renderer.setAnimationLoop((time, frame) => {
 	lastLoop = now;
 
 	if (!frame) {                                   // desktop / page mode: no head pose
-		if (now - lastProc > 1000 / S.hz) { tick(now, IDENT); drawHud(); }
+		if (now - lastReq > 1000 / S.hz) tick(now, IDENT);
+		if (hudDirty) { drawHud(); hudDirty = false; }
 		return;
 	}
 
@@ -369,10 +389,8 @@ renderer.setAnimationLoop((time, frame) => {
 	ctrls.forEach((k) => {
 		k.ray.material.color.set(grabbedBy === k.c ? 0x00ff88 : aimsAtHud(k.c) ? 0xffd200 : 0xffffff);
 	});
-	if (now - lastProc > 1000 / S.hz) {
-		tick(now, pose);
-		if (hudOn) { drawHud(); hudTex.needsUpdate = true; }
-	}
+	if (now - lastReq > 1000 / S.hz) tick(now, pose);
+	if (hudDirty && hudOn) { drawHud(); hudTex.needsUpdate = true; hudDirty = false; }
 	hudMesh.visible = hudOn;
 	placeMarkers(pose.p);
 	renderer.render(scene, camera);

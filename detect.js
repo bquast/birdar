@@ -60,34 +60,63 @@ export const boxMean = (I, w, h, x, y, r) => {
 	return s / ((x1 - x0) * (y1 - y0));
 };
 
-// sky colour: bright and blue (clear sky), or bright and grey/white (cloud, overcast)
-// beige tiles, green leaves, red roofs are not sky
-export const skyLike = (r, g, b, opt) => {
+// sky colour: 1 = blue (clear sky, can be deep blue), 2 = bright grey/white (cloud, overcast), 0 = not sky
+// beige tiles, green leaves, red roofs, grey shadows are not sky
+export const skyType = (r, g, b, opt) => {
 	const l = 0.299 * r + 0.587 * g + 0.114 * b;
-	if (l < opt.skyMin) return 0;
-	if (b > r + opt.blue && b >= g) return 1;
-	return (Math.max(r, g, b) - Math.min(r, g, b) < opt.grey) ? 1 : 0;
+	if (b > r + opt.blue && b >= g && l >= opt.blueMin) return 1;
+	return (l >= opt.greyMin && Math.max(r, g, b) - Math.min(r, g, b) < opt.grey) ? 2 : 0;
 };
 
-// 1 where the pixel is not sky, is darker than its surroundings,
-// and most of its surroundings are sky (a bird on sky, not a leaf on a tree)
-export const mask = (rgba, w, h, opt) => {
-	const g = gray(rgba, w, h);
-	const s = new Float32Array(w * h);
-	for (let i = 0; i < w * h; i++) {
-		s[i] = skyLike(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], opt);
+// half size, keep the darkest pixel of each 2x2 block: a small dark bird stays dark, the sky stays sky
+export const minPool2 = (rgba, w, h) => {
+	const W = w >> 1, H = h >> 1;
+	const out = new Uint8ClampedArray(W * H * 4);
+	for (let y = 0; y < H; y++) {
+		for (let x = 0; x < W; x++) {
+			let best = -1, bl = 1e9;
+			for (let dy = 0; dy < 2; dy++) {
+				for (let dx = 0; dx < 2; dx++) {
+					const i = ((2 * y + dy) * w + 2 * x + dx) * 4;
+					const l = 0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2];
+					if (l < bl) { bl = l; best = i; }
+				}
+			}
+			const o = (y * W + x) * 4;
+			out[o] = rgba[best]; out[o + 1] = rgba[best + 1]; out[o + 2] = rgba[best + 2]; out[o + 3] = 255;
+		}
 	}
-	const Ig = integral(g, w, h);
-	const Is = integral(s, w, h);
-	const m = new Uint8Array(w * h);
+	return [out, W, H];
+};
+
+// 1 where the pixel is a bird on sky:
+//   most of the area around it is sky (skyFrac), and
+//   it is darker than that sky by contrast. The sky level is the mean of the blue sky around it,
+//   so white clouds do not make the blue next to them look dark. With little blue (overcast,
+//   inside a cloud) the sky level is the mean of all sky around it.
+export const mask = (rgba, w, h, opt) => {
+	const n = w * h;
+	const g = gray(rgba, w, h);
+	const sky = new Float32Array(n), skyL = new Float32Array(n);
+	const blue = new Float32Array(n), blueL = new Float32Array(n);
+	for (let i = 0; i < n; i++) {
+		const t = skyType(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], opt);
+		sky[i] = t ? 1 : 0;
+		skyL[i] = t ? g[i] : 0;
+		blue[i] = t === 1 ? 1 : 0;
+		blueL[i] = t === 1 ? g[i] : 0;
+	}
+	const Is = integral(sky, w, h), IsL = integral(skyL, w, h);
+	const Ib = integral(blue, w, h), IbL = integral(blueL, w, h);
+	const m = new Uint8Array(n);
+	const r = opt.skyRadius;
 	for (let y = 0; y < h; y++) {
 		for (let x = 0; x < w; x++) {
-			const i = y * w + x;
-			if (s[i]) continue;
-			const frac = boxMean(Is, w, h, x, y, opt.skyRadius);
-			if (frac < opt.skyFrac) continue;
-			const bg = boxMean(Ig, w, h, x, y, opt.radius);
-			m[i] = (bg - g[i] >= opt.contrast) ? 1 : 0;
+			const fs = boxMean(Is, w, h, x, y, r);
+			if (fs < opt.skyFrac) continue;
+			const fb = boxMean(Ib, w, h, x, y, r);
+			const bg = fb >= 0.3 ? boxMean(IbL, w, h, x, y, r) / fb : boxMean(IsL, w, h, x, y, r) / fs;
+			m[y * w + x] = (bg - g[y * w + x] >= opt.contrast) ? 1 : 0;
 		}
 	}
 	return m;
